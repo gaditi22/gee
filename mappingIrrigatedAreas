@@ -1,0 +1,139 @@
+// Load your shapefile
+var admin2 = ee.FeatureCollection("FAO/GAUL_SIMPLIFIED_500m/2015/level2");
+// Here we will use Gandhinagar Shapefile.
+var Gandhinagar = admin2.filter(ee.Filter.eq('ADM1_NAME', 'Karnataka'));
+
+var visParams = {'color': 'red'};
+Map.addLayer(Gandhinagar, visParams, 'Karnataka');
+
+// Load sentinel data
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR");
+
+var rgbVis = {
+  min: 0.0,
+  max: 3000,
+  bands: ['B8', 'B4', 'B3'],
+};
+
+Map.centerObject(Gandhinagar);
+
+var filtered = s2
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+  .filter(ee.Filter.date('2018-04-01', '2019-09-30'))
+  .filter(ee.Filter.bounds(Gandhinagar))
+  .select('B2','B3','B4','B5','B6','B7','B8','B11');
+
+// Load or import change dataset.
+var hansenImage = ee.ImageCollection("ESA/WorldCover/v200").first();
+
+// Select the land/water mask.
+var datamask = hansenImage.select('datamask');
+
+// Create a binary mask.
+
+var mask = hansenImage.updateMask(hansenImage.eq(40));
+
+// Create a water mask layer, and set the image mask so that non-water areas
+// are opaque.
+
+// var agr_filtered = mask.clip(Gandhinagar);
+
+var composite = filtered.min().multiply(mask).clip(Gandhinagar);
+
+// Display the input composite.
+Map.addLayer(composite, rgbVis, 'image');
+
+// Merge all gcps
+var gcps = irrigated.merge(rainfed);
+print('GCPs',gcps);
+
+// Total data = 70% training data + 30% validation data
+var gcp = gcps.randomColumn();
+print('Random GCPs',gcp);
+
+var trainingGcp = gcp.filter(ee.Filter.lt('random', 0.7));
+var validationGcp = gcp.filter(ee.Filter.gte('random', 0.7));
+
+var ndvi = composite.normalizedDifference(['B8', 'B4']).rename('NDVI');
+
+
+var mndwi = composite.normalizedDifference(['B3', 'B11']).rename(['MNDWI']); 
+
+// Calculate EVI
+var evi = composite.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6*RED - 7.5*BLUE + 1))', {
+      'NIR': composite.select('B8').multiply(0.0001),
+      'RED': composite.select('B4').multiply(0.0001),
+      'BLUE' : composite.select('B2').multiply(0.0001)
+}).rename('EVI');
+
+
+var ndbi = composite.normalizedDifference(['B11', 'B8']).rename('NDBI');
+
+var gi = composite.normalizedDifference([ 'B8','B3']).rename('GI');
+
+
+var lswi = composite.normalizedDifference(['B8', 'B11']).rename('LSWI');
+
+
+var uai = composite.expression('(B4 + B3 + B2) / (B8 + B4 + B3 + B2)', {
+  'B2': composite.select('B2'),
+  'B3': composite.select('B3'),
+  'B4': composite.select('B4'),
+  'B8': composite.select('B8')
+}).rename('UAI');
+
+
+// Merge all indices
+// var indices = composite.addBands(ndvi).addBands(mndwi).addBands(evi).addBands(gi).addBands(gcvi).addBands(lswi).addBands(ndbi).addBands(uai);
+var indices = composite.addBands(ndvi).addBands(mndwi).addBands(evi).addBands(gi).addBands(uai).addBands(lswi).addBands(ndbi);
+
+
+// Overlay the point on the image to get training data.
+var training = indices.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['landcover'], 
+  scale: 10
+});
+
+// Train a classifier.
+var classifier = ee.Classifier.smileRandomForest(50).train({
+  features: training,  
+  classProperty: 'landcover', 
+  inputProperties: indices.bandNames()
+});
+
+var classified = indices.classify(classifier);
+
+Map.addLayer(classified, {min: 0, max: 1, palette: [ 'green', 'white']}, '2018-19');
+
+// Use classification map to assess accuracy using the validation fraction
+// of the overall training set created above.
+var test = classified.sampleRegions({
+  collection: validationGcp,
+  properties: ['landcover'],
+  tileScale: 16,
+  scale: 10,
+});
+
+
+// Update the composite mask with the water mask
+//var maskedComposite = classified.updateMask(mask);
+//Map.addLayer(maskedComposite, visParams, 'masked');
+
+
+var testConfusionMatrix = test.errorMatrix('landcover', 'classification');
+// Printing of confusion matrix may time out. Alternatively, you can export it as CSV
+print('Confusion Matrix', testConfusionMatrix);
+print('Producures Accuracy',testConfusionMatrix.producersAccuracy());
+print('Users Accuracy',testConfusionMatrix.consumersAccuracy());
+print('Test Accuracy', testConfusionMatrix.accuracy());
+print('kappa coefficient',testConfusionMatrix.kappa());
+
+// .area() function calculates the area in square meters
+var cityArea = Gandhinagar.geometry().area();
+// We can cast the result to a ee.Number() and calculate the
+// area in square kilometers
+var cityAreaSqKm = ee.Number(cityArea).divide(1e6).round();
+print(cityAreaSqKm);
+
